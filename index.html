@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PyBot (Browser)</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; }
+  .msg { margin: 8px 0; padding: 8px 12px; border-radius: 8px; max-width: 80%; white-space: pre-wrap; }
+  .user { background: #2a4d7a; margin-left: auto; }
+  .bot { background: #222; }
+  #bar { display: flex; padding: 12px; gap: 8px; background: #1a1a1a; }
+  #input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #333; background: #000; color: #eee; font-size: 16px; }
+  button { padding: 10px 16px; border: none; border-radius: 6px; background: #3b82f6; color: white; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<div id="bar">
+  <input id="input" placeholder="Type a message..." autocomplete="off" autofocus>
+  <button id="send">Send</button>
+</div>
+
+<script>
+const STORAGE_KEY = "pybot_kb";
+const THRESHOLD = 0.35;
+const STOPWORDS = new Set(["a","an","the","is","are","to","of","my","me","please","it","be"]);
+
+const DEFAULT_KB = {
+  greeting: { patterns: ["hi","hello","hey","good morning","good evening","yo"],
+              responses: ["Hello! What can I help you with?", "Hi there! Ask me anything I've been taught."] },
+  name:     { patterns: ["what is your name","who are you","your name"],
+              responses: ["I'm PyBot, a chatbot built from scratch in plain JavaScript."] },
+  time:     { patterns: ["what time is it","current time","tell me the time"],
+              responses: ["It's {time} right now."] },
+  date:     { patterns: ["what is today's date","what day is it","today date"],
+              responses: ["Today is {date}."] },
+  joke:     { patterns: ["tell me a joke","make me laugh","joke please"],
+              responses: ["Why do programmers prefer dark mode? Because light attracts bugs.",
+                          "Why did the function break up with the loop? It kept going around in circles."] },
+  bye:      { patterns: ["bye","goodbye","see you","exit","quit"],
+              responses: ["Goodbye! Refresh the page to chat again."] }
+};
+
+function tokenize(text) {
+  return (text.toLowerCase().match(/[a-z0-9']+/g) || []).filter(t => !STOPWORDS.has(t));
+}
+
+function countTokens(tokens) {
+  const c = {};
+  for (const t of tokens) c[t] = (c[t] || 0) + 1;
+  return c;
+}
+
+let kb = JSON.parse(localStorage.getItem(STORAGE_KEY)) || structuredClone(DEFAULT_KB);
+let docs = [], idf = {}, docVectors = [];
+let pendingQuestion = null;
+
+function buildIndex() {
+  docs = [];
+  for (const [tag, intent] of Object.entries(kb))
+    for (const p of intent.patterns) docs.push({ tag, counts: countTokens(tokenize(p)) });
+
+  const df = {};
+  for (const d of docs) for (const t of Object.keys(d.counts)) df[t] = (df[t] || 0) + 1;
+  const n = docs.length;
+  idf = {};
+  for (const t in df) idf[t] = Math.log((n + 1) / (df[t] + 1)) + 1;
+
+  docVectors = docs.map(d => ({ tag: d.tag, vec: vectorize(d.counts) }));
+}
+
+function vectorize(counts) {
+  const vec = {};
+  let norm = 0;
+  for (const t in counts) if (t in idf) {
+    vec[t] = counts[t] * idf[t];
+    norm += vec[t] * vec[t];
+  }
+  norm = Math.sqrt(norm);
+  if (norm) for (const t in vec) vec[t] /= norm;
+  return vec;
+}
+
+function cosine(a, b) {
+  let sum = 0;
+  for (const t in a) if (t in b) sum += a[t] * b[t];
+  return sum;
+}
+
+function fill(text) {
+  const now = new Date();
+  const time = now.toTimeString().slice(0, 5);
+  const date = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  return text.replace("{time}", time).replace("{date}", date);
+}
+
+function reply(text) {
+  const tokens = tokenize(text);
+  if (!tokens.length) return { text: "Could you say something a bit more specific?", matched: true };
+
+  const query = vectorize(countTokens(tokens));
+  let bestTag = null, bestScore = 0;
+  for (const d of docVectors) {
+    const s = cosine(query, d.vec);
+    if (s > bestScore) { bestScore = s; bestTag = d.tag; }
+  }
+  if (bestTag && bestScore >= THRESHOLD) {
+    const responses = kb[bestTag].responses;
+    return { text: fill(responses[Math.floor(Math.random() * responses.length)]), matched: true, tag: bestTag };
+  }
+  return { text: null, matched: false };
+}
+
+function learn(pattern, response) {
+  const tag = "learned_" + Date.now();
+  kb[tag] = { patterns: [pattern], responses: [response] };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(kb));
+  buildIndex();
+}
+
+function addMessage(text, who) {
+  const div = document.createElement("div");
+  div.className = "msg " + who;
+  div.textContent = text;
+  const log = document.getElementById("log");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function handleInput() {
+  const input = document.getElementById("input");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  addMessage(text, "user");
+
+  if (pendingQuestion !== null) {
+    if (text.toLowerCase() !== "skip") {
+      learn(pendingQuestion, text);
+      addMessage("Thanks, I've learned that!", "bot");
+    } else {
+      addMessage("No problem.", "bot");
+    }
+    pendingQuestion = null;
+    return;
+  }
+
+  const res = reply(text);
+  if (res.matched) {
+    addMessage(res.text, "bot");
+  } else {
+    addMessage("I don't know how to answer that. What should I say? (type 'skip' to pass)", "bot");
+    pendingQuestion = text;
+  }
+}
+
+document.getElementById("send").onclick = handleInput;
+document.getElementById("input").addEventListener("keydown", e => { if (e.key === "Enter") handleInput(); });
+
+buildIndex();
+addMessage("PyBot is online. Say something!", "bot");
+</script>
+</body>
+</html>
