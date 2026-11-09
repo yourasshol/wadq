@@ -1,41 +1,39 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<title>Tiny Code Model</title>
+<meta charset="utf-8">
+<title>Tiny English Chat Model</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; background: #fafafa; color: #222; }
-  textarea { width: 100%; height: 140px; font-family: monospace; font-size: 14px; box-sizing: border-box; }
-  input[type=text] { width: 70%; font-family: monospace; font-size: 14px; padding: 6px; }
-  button { padding: 6px 14px; font-size: 14px; cursor: pointer; }
-  #log { background: #111; color: #9f9; font-family: monospace; font-size: 12px; padding: 8px; height: 120px; overflow-y: auto; white-space: pre; }
-  #output { background: #fff; border: 1px solid #ccc; font-family: monospace; font-size: 14px; padding: 10px; white-space: pre-wrap; min-height: 120px; }
-  .row { margin: 12px 0; }
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2em auto; padding: 0 1em; }
+  textarea { width: 100%; height: 120px; font-family: monospace; }
+  #chat { border: 1px solid #ccc; height: 260px; overflow-y: auto; padding: 8px; white-space: pre-wrap; background: #fafafa; }
+  #log { font-family: monospace; font-size: 12px; background: #111; color: #0f0; height: 140px; overflow-y: auto; padding: 6px; white-space: pre-wrap; }
+  input[type=text] { width: 75%; padding: 6px; }
+  button { padding: 6px 12px; }
+  .row { margin: 8px 0; }
 </style>
 </head>
 <body>
-<h2>Tiny Code Model (trained from scratch)</h2>
-<p>A character-level neural network built on a custom autograd engine. It learns from the JavaScript snippets below, then continues whatever prompt you type. Expect short, rough output.</p>
-
-<div class="row">
-  <label>Training corpus (edit or replace freely):</label>
-  <textarea id="corpus"></textarea>
-</div>
+<h2>Tiny English Chat Model</h2>
+<p>A character-level neural network (256 hidden units) trained from scratch with a custom autograd engine. Click Train, wait for it to finish, then chat.</p>
 
 <div class="row">
   <button id="trainBtn">Train</button>
-  <span id="status">Not trained yet.</span>
+  <span id="status">Not trained</span>
 </div>
-
 <div id="log"></div>
 
 <div class="row">
-  <input type="text" id="prompt" value="function " placeholder="Type a code prompt">
-  <label>Temp <input type="number" id="temp" value="0.8" step="0.1" min="0.1" max="2" style="width:60px"></label>
-  <label>Length <input type="number" id="len" value="200" min="20" max="1000" style="width:70px"></label>
-  <button id="genBtn" disabled>Generate</button>
+  <div id="chat"></div>
 </div>
-<div id="output"></div>
+<div class="row">
+  <input type="text" id="msg" placeholder="Say something..." disabled>
+  <button id="sendBtn" disabled>Send</button>
+</div>
+<div class="row">
+  Temperature: <input type="range" id="temp" min="0.2" max="1.5" step="0.05" value="0.7">
+  <span id="tempVal">0.7</span>
+</div>
 
 <script>
 // ---------- Autograd engine ----------
@@ -44,343 +42,269 @@ class Value {
     this.data = data;
     this.grad = 0;
     this._prev = children;
-    this._backward = () => {};
+    this._back = () => {};
     this._op = op;
   }
-  add(other) {
-    other = other instanceof Value ? other : new Value(other);
-    const out = new Value(this.data + other.data, [this, other], '+');
-    out._backward = () => {
-      this.grad += out.grad;
-      other.grad += out.grad;
-    };
+  add(o) {
+    o = o instanceof Value ? o : new Value(o);
+    const out = new Value(this.data + o.data, [this, o], '+');
+    out._back = () => { this.grad += out.grad; o.grad += out.grad; };
     return out;
   }
-  mul(other) {
-    other = other instanceof Value ? other : new Value(other);
-    const out = new Value(this.data * other.data, [this, other], '*');
-    out._backward = () => {
-      this.grad += other.data * out.grad;
-      other.grad += this.data * out.grad;
-    };
+  mul(o) {
+    o = o instanceof Value ? o : new Value(o);
+    const out = new Value(this.data * o.data, [this, o], '*');
+    out._back = () => { this.grad += o.data * out.grad; o.grad += this.data * out.grad; };
     return out;
   }
-  pow(k) {
-    const out = new Value(Math.pow(this.data, k), [this], 'pow');
-    out._backward = () => {
-      this.grad += k * Math.pow(this.data, k - 1) * out.grad;
-    };
+  pow(n) {
+    const out = new Value(Math.pow(this.data, n), [this], '**');
+    out._back = () => { this.grad += n * Math.pow(this.data, n - 1) * out.grad; };
     return out;
   }
   relu() {
     const out = new Value(this.data > 0 ? this.data : 0, [this], 'relu');
-    out._backward = () => {
-      this.grad += (this.data > 0 ? 1 : 0) * out.grad;
-    };
-    return out;
-  }
-  exp() {
-    const e = Math.exp(this.data);
-    const out = new Value(e, [this], 'exp');
-    out._backward = () => {
-      this.grad += e * out.grad;
-    };
+    out._back = () => { this.grad += (this.data > 0 ? 1 : 0) * out.grad; };
     return out;
   }
   log() {
     const out = new Value(Math.log(this.data), [this], 'log');
-    out._backward = () => {
-      this.grad += (1 / this.data) * out.grad;
-    };
+    out._back = () => { this.grad += (1 / this.data) * out.grad; };
+    return out;
+  }
+  exp() {
+    const out = new Value(Math.exp(this.data), [this], 'exp');
+    out._back = () => { this.grad += out.data * out.grad; };
     return out;
   }
   neg() { return this.mul(-1); }
-  sub(other) { return this.add(other instanceof Value ? other.neg() : -other); }
-  div(other) { return this.mul(other instanceof Value ? other.pow(-1) : 1 / other); }
+  sub(o) { return this.add(o instanceof Value ? o.neg() : -o); }
+  div(o) { return this.mul(o instanceof Value ? o.pow(-1) : 1 / o); }
 
   backward() {
     const topo = [];
     const visited = new Set();
     const build = (v) => {
-      if (!visited.has(v)) {
-        visited.add(v);
-        for (const c of v._prev) build(c);
-        topo.push(v);
-      }
+      if (visited.has(v)) return;
+      visited.add(v);
+      for (const c of v._prev) build(c);
+      topo.push(v);
     };
     build(this);
     this.grad = 1;
-    for (let i = topo.length - 1; i >= 0; i--) topo[i]._backward();
+    for (let i = topo.length - 1; i >= 0; i--) topo[i]._back();
   }
 }
 
-// ---------- Random helpers ----------
-function randn(std = 0.1) {
+// ---------- Corpus ----------
+const CORPUS = `
+User: hello
+Bot: hello, how are you today?
+User: i am good, thank you
+Bot: that is great to hear.
+User: what is your name
+Bot: i am a tiny model that learns from text.
+User: how are you
+Bot: i am happy to talk with you.
+User: what is your favorite color
+Bot: i like blue. blue is like the sky.
+User: what do you like to do
+Bot: i like to read stories and talk with friends.
+User: tell me a story
+Bot: once upon a time there was a small dog. the dog liked to run in the park.
+User: what did the dog do
+Bot: the dog ran and played with a red ball all day.
+User: good morning
+Bot: good morning. i hope you have a nice day.
+User: good night
+Bot: good night. sleep well and dream of nice things.
+User: is it raining
+Bot: i do not know, but i hope the sun is out.
+User: do you like cats
+Bot: yes, cats are soft and quiet. they like to sleep in the sun.
+User: do you like dogs
+Bot: yes, dogs are friendly. they like to play and run.
+User: what is the weather like
+Bot: the weather can be warm or cold. i hope it is nice where you are.
+User: tell me a joke
+Bot: why did the cat sit on the computer. it wanted to keep an eye on the mouse.
+User: thank you
+Bot: you are welcome. i am glad i could help.
+User: what is a computer
+Bot: a computer is a machine that can follow steps and remember things.
+User: can you help me
+Bot: yes, i will try my best to help you.
+User: what is your job
+Bot: my job is to talk with you and learn new words.
+User: i feel sad
+Bot: i am sorry. talking with a friend can help a little.
+User: i feel happy
+Bot: that is wonderful. i am glad you feel happy today.
+User: what should i eat
+Bot: you could eat fruit, bread, or soup. eat what makes you feel good.
+User: where do birds live
+Bot: birds live in trees, in nests, and in the sky.
+User: how old are you
+Bot: i am very new. i learned everything just now.
+User: goodbye
+Bot: goodbye. come back and talk again soon.
+`.trim().toLowerCase();
+
+// ---------- Vocabulary ----------
+const chars = [...new Set(CORPUS)].sort();
+const stoi = {}, itos = {};
+chars.forEach((c, i) => { stoi[c] = i; itos[i] = c; });
+const V = chars.length;
+
+// ---------- Hyperparameters ----------
+const CTX = 16;        // characters of context
+const EMB = 8;         // embedding size per character
+const H = 256;         // hidden neurons
+const STEPS = 600;
+const BATCH = 8;
+const LR0 = 0.05;
+
+// ---------- Parameters ----------
+function randn(scale) {
   // Box-Muller
   const u = 1 - Math.random(), v = Math.random();
-  return std * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) * scale;
 }
-function matrix(rows, cols) {
+function matrix(rows, cols, scale) {
   const m = [];
   for (let i = 0; i < rows; i++) {
-    const row = [];
-    for (let j = 0; j < cols; j++) row.push(new Value(randn(0.1)));
-    m.push(row);
+    const r = [];
+    for (let j = 0; j < cols; j++) r.push(new Value(randn(scale)));
+    m.push(r);
   }
   return m;
 }
-
-// ---------- Default corpus ----------
-const DEFAULT_CORPUS = `
-const x = 5;
-let name = "Ada";
-var total = 0;
-function add(a, b) {
-  return a + b;
-}
-function square(n) {
-  return n * n;
-}
-function greet(name) {
-  return "Hello, " + name + "!";
-}
-for (let i = 0; i < 10; i++) {
-  console.log(i);
-}
-const nums = [1, 2, 3, 4, 5];
-const doubled = nums.map(n => n * 2);
-const evens = nums.filter(n => n % 2 === 0);
-function sum(arr) {
-  let s = 0;
-  for (const v of arr) {
-    s += v;
-  }
-  return s;
-}
-function max(arr) {
-  let m = arr[0];
-  for (let i = 1; i < arr.length; i++) {
-    if (arr[i] > m) m = arr[i];
-  }
-  return m;
-}
-function isEven(n) {
-  return n % 2 === 0;
-}
-function factorial(n) {
-  if (n <= 1) return 1;
-  return n * factorial(n - 1);
-}
-const person = { name: "Bob", age: 30 };
-console.log(person.name);
-function reverse(s) {
-  return s.split("").reverse().join("");
-}
-function countVowels(s) {
-  let count = 0;
-  for (const ch of s) {
-    if ("aeiou".includes(ch)) count++;
-  }
-  return count;
-}
-class Counter {
-  constructor() {
-    this.count = 0;
-  }
-  increment() {
-    this.count++;
-  }
-}
-const c = new Counter();
-c.increment();
-while (total < 5) {
-  total += 1;
-}
-function fib(n) {
-  let a = 0, b = 1;
-  for (let i = 0; i < n; i++) {
-    [a, b] = [b, a + b];
-  }
-  return a;
-}
-const upper = str => str.toUpperCase();
-function clamp(v, lo, hi) {
-  return Math.min(Math.max(v, lo), hi);
-}
-if (x > 3) {
-  console.log("big");
-} else {
-  console.log("small");
-}
-function findIndex(arr, target) {
-  for (let i = 0; i < arr.length; i++) {
-    if (arr[i] === target) return i;
-  }
-  return -1;
-}
-const squares = [];
-for (let i = 1; i <= 5; i++) {
-  squares.push(i * i);
-}
-function average(arr) {
-  return sum(arr) / arr.length;
-}
-const obj = { a: 1, b: 2 };
-for (const key in obj) {
-  console.log(key, obj[key]);
-}
-`;
-
-document.getElementById('corpus').value = DEFAULT_CORPUS.trim() + '\n';
-
-// ---------- Model ----------
-const CONTEXT = 8;     // characters of context
-const EMB = 8;         // embedding size
-const HIDDEN = 48;     // hidden units
-const LR = 0.05;
-
-let chars = [], stoi = {}, itos = {};
-let C, W1, b1, W2, b2;      // parameters
-let params = [];
-
-function buildVocab(text) {
-  chars = [...new Set(text)].sort();
-  stoi = {}; itos = {};
-  chars.forEach((ch, i) => { stoi[ch] = i; itos[i] = ch; });
+function vector(n) {
+  const v = [];
+  for (let i = 0; i < n; i++) v.push(new Value(0));
+  return v;
 }
 
-function initParams(vocabSize) {
-  C = matrix(vocabSize, EMB);
-  W1 = matrix(CONTEXT * EMB, HIDDEN);
-  b1 = [];
-  for (let j = 0; j < HIDDEN; j++) b1.push(new Value(0));
-  W2 = matrix(HIDDEN, vocabSize);
-  b2 = [];
-  for (let j = 0; j < vocabSize; j++) b2.push(new Value(0));
-  params = [];
-  for (const row of C) params.push(...row);
-  for (const row of W1) params.push(...row);
-  params.push(...b1);
-  for (const row of W2) params.push(...row);
-  params.push(...b2);
+let E, W1, b1, W2, b2, params;
+function initModel() {
+  E = matrix(V, EMB, 0.1);
+  W1 = matrix(H, CTX * EMB, Math.sqrt(2 / (CTX * EMB)));
+  b1 = vector(H);
+  W2 = matrix(V, H, Math.sqrt(1 / H));
+  b2 = vector(V);
+  params = [...E.flat(), ...W1.flat(), ...b1, ...W2.flat(), ...b2];
 }
 
-// Forward pass: context = array of char indices (length CONTEXT); returns logits Values
-function forward(ctx) {
-  // Gather embeddings
+// ---------- Forward pass ----------
+function forward(ctxIdx) {
+  // ctxIdx: array of CTX character indices
   const x = [];
-  for (const idx of ctx) {
-    for (let k = 0; k < EMB; k++) x.push(C[idx][k]);
-  }
-  // Hidden layer
+  for (const idx of ctxIdx) for (let k = 0; k < EMB; k++) x.push(E[idx][k]);
+
   const h = [];
-  for (let j = 0; j < HIDDEN; j++) {
-    let s = b1[j];
-    for (let i = 0; i < x.length; i++) s = s.add(x[i].mul(W1[i][j]));
+  for (let i = 0; i < H; i++) {
+    let s = b1[i];
+    const row = W1[i];
+    for (let j = 0; j < x.length; j++) s = s.add(row[j].mul(x[j]));
     h.push(s.relu());
   }
-  // Output logits
+
   const logits = [];
-  for (let j = 0; j < chars.length; j++) {
-    let s = b2[j];
-    for (let i = 0; i < HIDDEN; i++) s = s.add(h[i].mul(W2[i][j]));
+  for (let i = 0; i < V; i++) {
+    let s = b2[i];
+    const row = W2[i];
+    for (let j = 0; j < H; j++) s = s.add(row[j].mul(h[j]));
     logits.push(s);
   }
   return logits;
 }
 
-// Cross-entropy loss for one target
-function lossFor(ctx, target) {
-  const logits = forward(ctx);
-  // Numerically stable softmax: subtract max
-  let maxv = -Infinity;
-  for (const l of logits) if (l.data > maxv) maxv = l.data;
-  let denom = new Value(0);
-  const exps = logits.map(l => {
-    const e = l.add(-maxv).exp();
-    denom = denom.add(e);
-    return e;
-  });
-  const p = exps[target].div(denom);
-  return p.log().neg();
+// Cross-entropy with numerically stable softmax
+function crossEntropy(logits, target) {
+  let maxV = -Infinity;
+  for (const l of logits) if (l.data > maxV) maxV = l.data;
+  let sumExp = new Value(0);
+  for (const l of logits) sumExp = sumExp.add(l.sub(maxV).exp());
+  const logProb = logits[target].sub(maxV).sub(sumExp.log());
+  return logProb.neg();
 }
 
-// ---------- Training (chunked so the page stays responsive) ----------
+// ---------- Data batches ----------
+const ENCODED = [...CORPUS].map(c => stoi[c]);
+function sampleExample() {
+  const start = Math.floor(Math.random() * (ENCODED.length - CTX - 1));
+  return {
+    ctx: ENCODED.slice(start, start + CTX),
+    target: ENCODED[start + CTX]
+  };
+}
+
+// ---------- Training (chunked so the UI stays responsive) ----------
 const logEl = document.getElementById('log');
-function log(msg) {
-  logEl.textContent += msg + '\n';
+const statusEl = document.getElementById('status');
+const trainBtn = document.getElementById('trainBtn');
+const msgInput = document.getElementById('msg');
+const sendBtn = document.getElementById('sendBtn');
+let trained = false;
+
+function log(s) {
+  logEl.textContent += s + '\n';
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-let encoded = [];
-let trainedFlag = false;
-
-function encodeCorpus(text) {
-  return [...text].map(ch => stoi[ch]);
-}
-
-function pickSample() {
-  const start = Math.floor(Math.random() * (encoded.length - CONTEXT - 1));
-  const ctx = encoded.slice(start, start + CONTEXT);
-  const target = encoded[start + CONTEXT];
-  return { ctx, target };
-}
-
-function train(totalSteps = 1500) {
-  const text = document.getElementById('corpus').value;
-  buildVocab(text);
-  encoded = encodeCorpus(text);
-  initParams(chars.length);
+function train() {
+  trainBtn.disabled = true;
+  trained = false;
+  statusEl.textContent = 'Training...';
   logEl.textContent = '';
-  log(`Vocab size: ${chars.length}, corpus chars: ${encoded.length}, parameters: ${params.length}`);
-  document.getElementById('status').textContent = 'Training...';
-  document.getElementById('trainBtn').disabled = true;
-  document.getElementById('genBtn').disabled = true;
+  initModel();
+  log(`Vocabulary size: ${V}, parameters: ${params.length}`);
 
   let step = 0;
-  const BATCH = 4;
-  const chunk = () => {
-    const chunkEnd = Math.min(step + 20, totalSteps);
-    for (; step < chunkEnd; step++) {
-      // Build batch loss
-      let total = new Value(0);
+  function chunk() {
+    const t0 = performance.now();
+    while (step < STEPS && performance.now() - t0 < 100) {
+      const lr = LR0 * (1 - step / STEPS) + 0.001;
+      let batchLoss = new Value(0);
       for (let b = 0; b < BATCH; b++) {
-        const { ctx, target } = pickSample();
-        total = total.add(lossFor(ctx, target));
+        const ex = sampleExample();
+        const logits = forward(ex.ctx);
+        batchLoss = batchLoss.add(crossEntropy(logits, ex.target));
       }
-      const avg = total.mul(1 / BATCH);
+      batchLoss = batchLoss.div(BATCH);
 
-      // Zero grads, backprop
       for (const p of params) p.grad = 0;
-      avg.backward();
-
-      // SGD step with decaying learning rate
-      const lr = LR * (1 - step / totalSteps) + 0.005;
+      batchLoss.backward();
       for (const p of params) p.data -= lr * p.grad;
 
-      if (step % 100 === 0 || step === totalSteps - 1) {
-        log(`step ${String(step).padStart(5)}  loss ${avg.data.toFixed(4)}`);
-      }
+      if (step % 50 === 0) log(`step ${step} loss ${batchLoss.data.toFixed(4)}`);
+      step++;
     }
-    if (step < totalSteps) {
-      document.getElementById('status').textContent = `Training... ${Math.round(100 * step / totalSteps)}%`;
+    if (step < STEPS) {
+      statusEl.textContent = `Training... ${Math.round(100 * step / STEPS)}%`;
       setTimeout(chunk, 0);
     } else {
-      trainedFlag = true;
-      document.getElementById('status').textContent = 'Trained.';
-      document.getElementById('trainBtn').disabled = false;
-      document.getElementById('genBtn').disabled = false;
       log('Done.');
+      statusEl.textContent = 'Trained';
+      trained = true;
+      trainBtn.disabled = false;
+      msgInput.disabled = false;
+      sendBtn.disabled = false;
+      msgInput.focus();
     }
-  };
-  setTimeout(chunk, 0);
+  }
+  chunk();
 }
 
 // ---------- Generation ----------
-function sampleFrom(logits, temp) {
-  const scaled = logits.map(l => l.data / temp);
-  const m = Math.max(...scaled);
-  const exps = scaled.map(s => Math.exp(s - m));
+const tempSlider = document.getElementById('temp');
+const tempVal = document.getElementById('tempVal');
+tempSlider.oninput = () => tempVal.textContent = tempSlider.value;
+
+function sampleFrom(logits, temperature) {
+  const scaled = logits.map(l => l.data / temperature);
+  const maxV = Math.max(...scaled);
+  const exps = scaled.map(s => Math.exp(s - maxV));
   const total = exps.reduce((a, b) => a + b, 0);
   let r = Math.random() * total;
   for (let i = 0; i < exps.length; i++) {
@@ -390,35 +314,41 @@ function sampleFrom(logits, temp) {
   return exps.length - 1;
 }
 
-function generate() {
-  const prompt = document.getElementById('prompt').value;
-  const temp = parseFloat(document.getElementById('temp').value) || 0.8;
-  const maxLen = parseInt(document.getElementById('len').value) || 200;
-  const outEl = document.getElementById('output');
+function reply(userText) {
+  const prompt = `user: ${userText.toLowerCase()}\nbot: `;
+  let context = prompt.slice(-CTX).padStart(CTX, ' ');
+  let out = '';
+  const temperature = parseFloat(tempSlider.value);
 
-  // Build context from prompt, padding with first char if too short
-  let text = prompt;
-  const pad = stoi[' '] !== undefined ? stoi[' '] : 0;
-  let ctx = [...text].map(ch => (stoi[ch] !== undefined ? stoi[ch] : pad));
-  while (ctx.length < CONTEXT) ctx.unshift(pad);
-
-  let out = prompt;
-  for (let i = 0; i < maxLen; i++) {
-    const window = ctx.slice(-CONTEXT);
-    const logits = forward(window);
-    const next = sampleFrom(logits, temp);
-    ctx.push(next);
-    out += itos[next];
+  for (let i = 0; i < 200; i++) {
+    const idxs = [...context].map(c => stoi[c] !== undefined ? stoi[c] : stoi[' ']);
+    const logits = forward(idxs);
+    const next = itos[sampleFrom(logits, temperature)];
+    if (next === '\n') break;
+    out += next;
+    context = context.slice(1) + next;
   }
-  outEl.textContent = out;
+  return out.trim();
 }
 
-// ---------- Wire up ----------
-document.getElementById('trainBtn').addEventListener('click', () => train(1500));
-document.getElementById('genBtn').addEventListener('click', () => {
-  if (!trainedFlag) return;
-  generate();
-});
+function addMessage(who, text) {
+  const chat = document.getElementById('chat');
+  chat.textContent += `${who}: ${text}\n\n`;
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function send() {
+  const text = msgInput.value.trim();
+  if (!text || !trained) return;
+  msgInput.value = '';
+  addMessage('You', text);
+  const answer = reply(text);
+  addMessage('Bot', answer || '...');
+}
+
+trainBtn.onclick = train;
+sendBtn.onclick = send;
+msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 </script>
 </body>
 </html>
